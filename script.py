@@ -5,40 +5,51 @@ import logging
 import re
 import os
 
-
+# --- CONFIGURATION ---
 SITES_TO_MONITOR = [  
     {
          "name": "MachineWise",
-         "target_url": "https://machinewise.store/collections/mojave-inventory",
+         "target_url": "https://machinewise.store/collections/mojave-smart-inventory/products.json",
          "base_url": "https://machinewise.store",
-         "regex_pattern": r'<a[^>]*?href="(/products/[^"]+)"[^>]*?class="[^"]*?full-unstyled-link[^"]*?"',
-         "ntfy_topic_url": "https://ntfy.sh/",
+         "method": "json", 
+         "ntfy_topic_url": "",
      },
      {
         "name": "GrimsmoNorseman",
-        "target_url": "https://grimsmoknives.com/collections/norseman-inventory",
+        "target_url": "https://grimsmoknives.com/collections/norseman-inventory/products.json",
         "base_url": "https://grimsmoknives.com",
-        "regex_pattern": r'<a href="(/products/[^"]+)" class="product-card__media"',
-        "ntfy_topic_url": "https://ntfy.sh/", 
+        "method": "json",
+        "ntfy_topic_url": "",
     },
     {
         "name": "GrimsmoRask",
-        "target_url": "https://grimsmoknives.com/collections/rask-inventory",
+        "target_url": "https://grimsmoknives.com/collections/rask-inventory/products.json",
         "base_url": "https://grimsmoknives.com",
-        "regex_pattern": r'<a href="(/products/[^"]+)" class="product-card__media"',
-        "ntfy_topic_url": "https://ntfy.sh/", 
+        "method": "json",
+        "ntfy_topic_url": "",
     },
     {
         "name": "Recon1",
-        "target_url": "https://recon1.com/collections/new?sort_by=created-descending",
+        "target_url": "https://recon1.com/collections/new/products.json?sort_by=created-descending",
         "base_url": "https://recon1.com",
-        "regex_pattern": r'<a href="(/products/[^"]+)" class="product-card__media"',
-        "ntfy_topic_url": "https://ntfy.sh/", 
+        "method": "json",
+        "ntfy_topic_url": "",
     }
 ]
 
-CHECK_INTERVAL_SECONDS = 60
-STATE_DIR = "inventory_states" # Directory to store state files
+# {
+#     "name": "NonShopifySite",
+#     "target_url": "https://some-other-store.com/new-arrivals",
+#     "base_url": "https://some-other-store.com",
+#     "regex_pattern": r'<a href="(/products/[^"]+)" class="product-link"', Insert regex here
+#     "method": "regex", # Use the 'regex' method
+#     "ntfy_topic_url": ,
+# }
+
+CHECK_INTERVAL_SECONDS = 30
+STATE_DIR = "inventory_states"
+
+# --- SCRIPT LOGIC ---
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
@@ -52,7 +63,6 @@ def load_known_inventory(state_file):
 
 def save_known_inventory(inventory_urls, state_file):
     """Saves the current set of inventory URLs to a specific state file."""
-    # Ensure the state directory exists
     os.makedirs(os.path.dirname(state_file), exist_ok=True)
     with open(state_file, 'w') as f:
         json.dump(list(inventory_urls), f)
@@ -70,7 +80,47 @@ def send_notification(title, message, ntfy_topic_url):
     except requests.exceptions.RequestException as e:
         logger.error(f"Failed to send notification: {e}")
 
-def get_current_inventory(name, target_url, base_url, pattern):
+def get_inventory_by_json(name, target_url, base_url):
+    """Fetches a Shopify collection's .json endpoint and returns a set of product URLs."""
+    logger = logging.getLogger(name)
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        response = requests.get(target_url, headers=headers, timeout=15)
+        response.raise_for_status()
+
+        data = response.json()
+        inventory_urls = set()
+        
+        if 'products' not in data or not data['products']:
+             logger.info("Found 0 items in JSON response.")
+             return set()
+
+        for product in data['products']:
+            # 'handle' is the product's unique URL slug
+            product_slug = product['handle'] 
+            full_url = f"{base_url}/products/{product_slug}"
+            inventory_urls.add(full_url)
+        
+        logger.info(f"Found {len(inventory_urls)} items from JSON endpoint.")
+        return inventory_urls
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Could not fetch JSON content: {e}")
+        return None
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to decode JSON from response: {e}")
+        # Save the invalid response for debugging
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(os.path.join(STATE_DIR, f"debug_{name}.html"), 'w', encoding='utf-8') as f:
+            f.write(response.text)
+        return None
+    except Exception as e:
+        logger.error(f"An error occurred during JSON parsing: {e}")
+        return None
+
+def get_inventory_by_regex(name, target_url, base_url, pattern):
     """Fetches a website and returns a set of current inventory item URLs using a given regex pattern."""
     logger = logging.getLogger(name)
     try:
@@ -82,8 +132,14 @@ def get_current_inventory(name, target_url, base_url, pattern):
 
         relative_urls = re.findall(pattern, response.text)
         
+        if not relative_urls:
+            logger.warning(f"Regex found 0 items. Saving HTML for review.")
+            os.makedirs(STATE_DIR, exist_ok=True)
+            with open(os.path.join(STATE_DIR, f"debug_{name}.html"), 'w', encoding='utf-8') as f:
+                f.write(response.text)
+        
         inventory_urls = {base_url + url for url in relative_urls}
-        logger.info(f"Found {len(inventory_urls)} items on the page.")
+        logger.info(f"Found {len(inventory_urls)} items from regex.")
         return inventory_urls
 
     except requests.exceptions.RequestException as e:
@@ -105,12 +161,20 @@ def check_site(site_config):
     if not known_inventory:
         logger.info(f"State file not found or empty. Starting with a fresh inventory list for {name}.")
 
-    current_inventory = get_current_inventory(
-        name,
-        site_config["target_url"],
-        site_config["base_url"],
-        site_config["regex_pattern"]
-    )
+    current_inventory = None
+    if site_config["method"] == "json":
+        current_inventory = get_inventory_by_json(
+            name,
+            site_config["target_url"],
+            site_config["base_url"]
+        )
+    elif site_config["method"] == "regex":
+        current_inventory = get_inventory_by_regex(
+            name,
+            site_config["target_url"],
+            site_config["base_url"],
+            site_config["regex_pattern"]
+        )
     
     if current_inventory is not None:
         if not known_inventory and current_inventory:
@@ -127,13 +191,22 @@ def check_site(site_config):
                     f"A new item has been listed: {item_url}",
                     site_config["ntfy_topic_url"]
                 )
+            # Save the new complete list
             save_known_inventory(current_inventory, state_file)
         else:
             logger.info("No new items found.")
 
 def main():
     """The main function that runs the monitoring loop."""
-    logging.info("Starting multi-site inventory monitor...")
+    logging.info("Starting multi-site inventory monitor (JSON API)...")
+    
+    unique_topics = {site["ntfy_topic_url"] for site in SITES_TO_MONITOR}
+    for topic_url in unique_topics:
+        send_notification(
+            "Inventory Monitor Started - v3 (JSON)",
+            "The script is now running and checking for new items using the Shopify JSON API.",
+            topic_url
+        )
     
     while True:
         for site in SITES_TO_MONITOR:
