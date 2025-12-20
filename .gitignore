@@ -1,2 +1,7 @@
-known_inventory.json
+config.json
 inventory_states/
+known_inventory.json
+__pycache__/
+.venv/
+.DS_Store
+*.log

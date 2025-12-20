@@ -5,53 +5,23 @@ import logging
 import re
 import os
 
-# --- CONFIGURATION ---
-SITES_TO_MONITOR = [  
-    {
-         "name": "MachineWise",
-         "target_url": "https://machinewise.store/collections/mojave-smart-inventory/products.json",
-         "base_url": "https://machinewise.store",
-         "method": "json", 
-         "ntfy_topic_url": "",
-     },
-     {
-        "name": "GrimsmoNorseman",
-        "target_url": "https://grimsmoknives.com/collections/norseman-inventory/products.json",
-        "base_url": "https://grimsmoknives.com",
-        "method": "json",
-        "ntfy_topic_url": "",
-    },
-    {
-        "name": "GrimsmoRask",
-        "target_url": "https://grimsmoknives.com/collections/rask-inventory/products.json",
-        "base_url": "https://grimsmoknives.com",
-        "method": "json",
-        "ntfy_topic_url": "",
-    },
-    {
-        "name": "Recon1",
-        "target_url": "https://recon1.com/collections/new/products.json?sort_by=created-descending",
-        "base_url": "https://recon1.com",
-        "method": "json",
-        "ntfy_topic_url": "",
-    }
-]
-
-# {
-#     "name": "NonShopifySite",
-#     "target_url": "https://some-other-store.com/new-arrivals",
-#     "base_url": "https://some-other-store.com",
-#     "regex_pattern": r'<a href="(/products/[^"]+)" class="product-link"', Insert regex here
-#     "method": "regex", # Use the 'regex' method
-#     "ntfy_topic_url": ,
-# }
-
-CHECK_INTERVAL_SECONDS = 30
+CONFIG_FILE = "config.json"
 STATE_DIR = "inventory_states"
 
 # --- SCRIPT LOGIC ---
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+def load_config():
+    """Loads configuration from the config file."""
+    if not os.path.exists(CONFIG_FILE):
+        return None
+    try:
+        with open(CONFIG_FILE, 'r') as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        logging.error(f"Failed to parse config file: {e}")
+        return None
 
 def load_known_inventory(state_file):
     """Loads the set of known inventory URLs from a specific state file."""
@@ -80,7 +50,7 @@ def send_notification(title, message, ntfy_topic_url):
     except requests.exceptions.RequestException as e:
         logger.error(f"Failed to send notification: {e}")
 
-def get_inventory_by_json(name, target_url, base_url):
+def get_inventory_by_json(name, target_url, base_url, check_availability=False):
     """Fetches a Shopify collection's .json endpoint and returns a set of product URLs."""
     logger = logging.getLogger(name)
     try:
@@ -93,15 +63,43 @@ def get_inventory_by_json(name, target_url, base_url):
         data = response.json()
         inventory_urls = set()
         
-        if 'products' not in data or not data['products']:
+        if 'products' in data and data['products']:
+            for product in data['products']:
+                # 'handle' is the product's unique URL slug
+                product_slug = product['handle'] 
+                
+                should_add = True
+                if check_availability:
+                    should_add = False
+                    for variant in product.get('variants', []):
+                        if variant.get('available', False):
+                            should_add = True
+                            break
+                
+                if should_add:
+                    full_url = f"{base_url}/products/{product_slug}"
+                    inventory_urls.add(full_url)
+        elif 'product' in data and data['product']:
+             product = data['product']
+             product_slug = product['handle']
+             if 'variants' in product:
+                 for variant in product['variants']:
+                     if variant.get('inventory_management') == 'shopify' and variant.get('available', True): # Check availability if possible, though JSON might not have it directly in this view sometimes
+                         variant_id = variant['id']
+                         full_url = f"{base_url}/products/{product_slug}?variant={variant_id}"
+                         inventory_urls.add(full_url)
+                     # If inventory_management is null, it might be always available, or we just track it. 
+                     # For now, let's track all variants to be safe, or filter as needed. 
+                     # The previous logic didn't check availability for collections, so we'll stick to existence for now unless specified.
+                     else:
+                         # Fallback if we want to track everything
+                         variant_id = variant['id']
+                         full_url = f"{base_url}/products/{product_slug}?variant={variant_id}"
+                         inventory_urls.add(full_url)
+
+        if not inventory_urls:
              logger.info("Found 0 items in JSON response.")
              return set()
-
-        for product in data['products']:
-            # 'handle' is the product's unique URL slug
-            product_slug = product['handle'] 
-            full_url = f"{base_url}/products/{product_slug}"
-            inventory_urls.add(full_url)
         
         logger.info(f"Found {len(inventory_urls)} items from JSON endpoint.")
         return inventory_urls
@@ -166,7 +164,8 @@ def check_site(site_config):
         current_inventory = get_inventory_by_json(
             name,
             site_config["target_url"],
-            site_config["base_url"]
+            site_config["base_url"],
+            site_config.get("check_availability", False)
         )
     elif site_config["method"] == "regex":
         current_inventory = get_inventory_by_regex(
@@ -198,22 +197,34 @@ def check_site(site_config):
 
 def main():
     """The main function that runs the monitoring loop."""
-    logging.info("Starting multi-site inventory monitor (JSON API)...")
+    logging.info("Starting multi-site inventory monitor...")
     
-    unique_topics = {site["ntfy_topic_url"] for site in SITES_TO_MONITOR}
+    config = load_config()
+    if not config:
+        logging.error(f"Configuration file '{CONFIG_FILE}' not found or invalid. Please copy config.example.json to {CONFIG_FILE} and customize it.")
+        return
+
+    sites_to_monitor = config.get("sites", [])
+    check_interval = config.get("check_interval_seconds", 60)
+
+    if not sites_to_monitor:
+        logging.error("No sites configured to monitor.")
+        return
+
+    unique_topics = {site["ntfy_topic_url"] for site in sites_to_monitor}
     for topic_url in unique_topics:
         send_notification(
-            "Inventory Monitor Started - v3 (JSON)",
-            "The script is now running and checking for new items using the Shopify JSON API.",
+            "Inventory Monitor Started",
+            "The script is now running and checking for new items.",
             topic_url
         )
     
     while True:
-        for site in SITES_TO_MONITOR:
+        for site in sites_to_monitor:
             check_site(site)
         
-        logging.info(f"All sites checked. Waiting for {CHECK_INTERVAL_SECONDS} seconds...")
-        time.sleep(CHECK_INTERVAL_SECONDS)
+        logging.info(f"All sites checked. Waiting for {check_interval} seconds...")
+        time.sleep(check_interval)
 
 if __name__ == "__main__":
     main()

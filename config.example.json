@@ -1,0 +1,20 @@
+{
+  "check_interval_seconds": 60,
+  "sites": [
+    {
+      "name": "ExampleShopifySite",
+      "target_url": "https://example.com/products.json",
+      "base_url": "https://example.com",
+      "method": "json",
+      "ntfy_topic_url": "https://ntfy.sh/mytimeout"
+    },
+    {
+      "name": "ExampleRegexSite",
+      "target_url": "https://other-store.com/new-arrivals",
+      "base_url": "https://other-store.com",
+      "method": "regex",
+      "regex_pattern": "<a href=\"(/products/[^\"]+)\" class=\"product-link\"",
+      "ntfy_topic_url": "https://ntfy.sh/mytimeout"
+    }
+  ]
+}
