@@ -1,4 +1,4 @@
-# Knife Checker
+# Shopify Inventory Monitor
 
 A simple, configurable Python script to monitor Shopify and other websites for knife restocks (or any other products) and send notifications via [ntfy.sh](https://ntfy.sh).
 
